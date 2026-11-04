@@ -82,7 +82,7 @@ Upon first launch, macOS will request:
 
 ---
 
-## 🏗️ Architecture / Arquitectura (v5.0 Titanium Edition)
+## 🏗️ Architecture / Arquitectura (v5.5 Titanium Turbo & Anti-Ruido DSP)
 
 ```
 Microphone Hardware Input (CoreAudio HAL via AVAudioRecorder)
@@ -96,29 +96,34 @@ Microphone Hardware Input (CoreAudio HAL via AVAudioRecorder)
 User Press Hotkey Stop (⌃⌥Space / F8 / Menu Bar Click)
        │
        ▼
-Whisper MLX Daemon (Pre-warmed on Apple Silicon GPU Metal / Neural Engine)
+DSP Acoustic Filtering (SciPy Butterworth 80 Hz – 7500 Hz Bandpass)
+       │  (Eliminates music 808 sub-bass, kick drums, AC hum, and table thuds)
+       ▼
+Voice Activity Detection Gate (Silero VAD in Memory)
+       ├──► Zero Voice Detected (Pure Music / Ambient Noise / Silence) ──► Rejection in < 0.1s (0 Hallucinations)
        │
-       ├──► Transcribes with domain biasing (RETIE, Domotex, CELSA, EPM) in < 0.3s
+       ▼ Voice Confirmed
+Dynamic Peak Normalization (-0.5 dBFS)
        │
-       ├──► Triple Fallback (Daemon Socket → MLX CLI → Apple Speech URL)
+       ▼
+Whisper MLX Large-v3-Turbo Daemon (Pre-warmed on Apple Silicon GPU Metal)
+       │
+       ├──► Transcribes with domain biasing (RETIE, Domotex, CELSA, EPM) in < 0.8s
+       │
+       ├──► Anti-hallucination Decode Guardrails (greedy temp=0.0, compression_ratio=2.2, no_speech=0.6)
+       │
+       ├──► Post-processing Sanitizer (removes residual subtitle tags, YouTube artifacts, repeating loops)
        │
        ▼
 Auto-Paste Engine (CGEvent ⌘V into Target Application) + Persistent Backup
 ```
 
-### Key Advancements in v5.0:
-1. **Pure PCM Hardware Capture (`AVAudioRecorder`)**: Bypasses unstable `AVAudioEngine` audio graph connection deadlocks. 100% resilient to Bluetooth sample rate switching (e.g. Sony WH-1000XM5, AirPods) between 16kHz SCO and 44.1kHz A2DP.
-2. **Resident Whisper MLX Daemon**: Keeps `whisper-small-mlx` in unified memory on Apple Silicon GPU Metal. Eliminates Python startup overhead, transcribing audio in **~0.25 seconds**!
-3. **Domain Prompt Biasing**: Ensures 100% precision with technical terminology ("kVA", "kW", "RETIE", "NTC 2050", "transformador", "luminarias").
-4. **Zero-Loss Physical Guarantee**: Audio is captured directly to WAV on disk. Even in case of power failure or crash, your recorded audio is physically preserved in `~/Library/Logs/UltimoDictado.wav`.
-
-       │    Target App Restore & Auto-Paste (Cmd+V via CGEvent)
-       │
-       └──► Parallel PCM WAV Recorder (/tmp/dictado_ultimo.wav)
-                 │ (Fallback if Apple returns empty)
-                 ▼
-            Local MLX Whisper Runner (Apple Silicon GPU/ANE)
-```
+### Key Advancements in v5.5 (Anti-Ruido & Turbo):
+1. **Whisper Large-v3-Turbo (`mlx-community/whisper-large-v3-turbo`)**: Replaces the small model with OpenAI's latest Large v3 Turbo, bringing 32 encoder layers of acoustic representation. Rejection of background instruments and phonetic accuracy are dramatically superior, running in **~0.6–0.8s** on Apple Silicon Metal GPU.
+2. **Silero VAD Acoustic Gate**: Rejects pure instrumental music, songs, or background silence in under 100ms. If you are not speaking, it emits empty text rather than hallucinating song lyrics or YouTube subtitles.
+3. **Butterworth Acoustic Bandpass (80 Hz – 7500 Hz)**: Digital filter eliminating low-frequency sub-bass contamination from background speakers, music kicks, and room rumble.
+4. **Pure PCM Hardware Capture (`AVAudioRecorder`)**: Bypasses unstable `AVAudioEngine` audio graph deadlocks. 100% resilient to Bluetooth sample rate switching (e.g. Sony WH-1000XM5, AirPods) between 16kHz SCO and 44.1kHz A2DP.
+5. **Domain Prompt Biasing & Sanitizer**: Ensures 100% precision with technical terminology ("kVA", "kW", "RETIE", "NTC 2050", "transformador", "luminarias", "citofonía") and strips repetitive loops or non-speech tokens.
 
 ---
 

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Compila e instala Dictado Domotex v5.0 en ~/Applications y lo deja arrancando con el Mac.
+# Compila e instala Dictado Domotex v5.5 (Titanio Turbo & Anti-Ruido DSP) en ~/Applications y lo deja arrancando con el Mac.
 set -e
 cd "$(dirname "$0")"
 
@@ -14,8 +14,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleName</key><string>Dictado Domotex</string>
   <key>CFBundleExecutable</key><string>DictadoDomotex</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>5.0</string>
-  <key>CFBundleVersion</key><string>5</string>
+  <key>CFBundleShortVersionString</key><string>5.5</string>
+  <key>CFBundleVersion</key><string>6</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Para escuchar tu voz y escribir lo que dictas en cualquier ventana con Whisper MLX.</string>
@@ -28,9 +28,11 @@ cp whisper_daemon.py "$APP/Contents/Resources/whisper_daemon.py"
 chmod +x "$APP/Contents/Resources/whisper_daemon.py"
 
 pkill -x DictadoDomotex 2>/dev/null || true
+pkill -f "whisper_daemon.py" 2>/dev/null || true
+rm -f /tmp/dictado_whisper.sock
 sleep 0.5
 
-echo "Compilando Dictado Domotex v5.0 (Swift 5 + Carbon + AVFoundation + Speech)..."
+echo "Compilando Dictado Domotex v5.5 (Swift 5 + Carbon + AVFoundation + Speech)..."
 swiftc -O -swift-version 5 main.swift -o "$APP/Contents/MacOS/DictadoDomotex" \
   -framework Cocoa -framework Speech -framework AVFoundation -framework Carbon
 
@@ -54,4 +56,4 @@ launchctl load "$PL"
 
 sleep 0.5
 open "$APP"
-echo "OK: Dictado Domotex v5.0 (Titanio) instalado y en ejecución"
+echo "OK: Dictado Domotex v5.5 (Titanio Turbo & Anti-Ruido DSP) instalado y en ejecución"
