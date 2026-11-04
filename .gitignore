@@ -1,0 +1,6 @@
+.DS_Store
+*.app/
+*.o
+*.dSYM/
+OpenMacDictate
+/tmp/
