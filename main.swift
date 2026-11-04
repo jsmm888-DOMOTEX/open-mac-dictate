@@ -261,7 +261,7 @@ final class Overlay {
 
 // MARK: - Motor de Dictado Integral (Continuo + Sin Límite de Tiempo)
 final class DictationEngine {
-    private let engine = AVAudioEngine()
+    private var engine: AVAudioEngine?
     private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
@@ -269,6 +269,7 @@ final class DictationEngine {
     private let lock = NSLock()
     private var sessionID = 0
     private(set) var isRecording = false
+    private var buffersReceivedInSession = 0
 
     let accumulator = SpeechAccumulator()
     let recorder = AudioFileRecorder()
@@ -284,6 +285,20 @@ final class DictationEngine {
                 break
             }
         }
+
+        // Monitorear cambios de hardware de audio (desconexión, reposo/wake, AirPods)
+        NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] _ in
+            log("CoreAudio reportó cambio de configuración de audio (wake/reposo/dispositivo)")
+            guard let self = self, self.isRecording else { return }
+            // Si estábamos grabando en medio de un cambio de ruta, reiniciar motor
+            log("Reiniciando captura tras cambio de hardware de audio en vivo...")
+            self.recoverAudioEngine()
+        }
+    }
+
+    private func recoverAudioEngine() {
+        guard isRecording, let recognizer = recognizer else { return }
+        cycleSubtask()
     }
 
     func start(continuationText: String? = nil) throws {
@@ -298,16 +313,34 @@ final class DictationEngine {
             log("Continuando texto previo (\(cont.count) caracteres)")
         }
 
+        // Limpiar motor anterior si existía para garantizar conexión 100% fresca al micrófono
+        if let old = engine {
+            old.stop()
+            old.inputNode.removeTap(onBus: 0)
+            old.reset()
+        }
+
+        let newEngine = AVAudioEngine()
+        self.engine = newEngine
+
         isRecording = true
         sessionID += 1
+        buffersReceivedInSession = 0
 
-        let input = engine.inputNode
+        let input = newEngine.inputNode
         let fmt = input.outputFormat(forBus: 0)
+
+        guard fmt.sampleRate > 0 && fmt.channelCount > 0 else {
+            throw NSError(domain: "Dictado", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Formato de micrófono inválido o inactivo (sampleRate=0)"])
+        }
+
         recorder.start(format: fmt)
 
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: fmt) { [weak self] buf, _ in
             guard let self = self else { return }
+            self.buffersReceivedInSession += 1
             self.recorder.append(buf)
             self.lock.lock()
             let r = self.request
@@ -315,8 +348,8 @@ final class DictationEngine {
             r?.append(buf)
         }
 
-        engine.prepare()
-        try engine.start()
+        newEngine.prepare()
+        try newEngine.start()
 
         launchTask(recognizer)
         scheduleProactiveCycle()
@@ -405,8 +438,12 @@ final class DictationEngine {
         cycleTimer?.invalidate()
         cycleTimer = nil
 
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
+        if let eng = engine {
+            eng.stop()
+            eng.inputNode.removeTap(onBus: 0)
+            eng.reset()
+            self.engine = nil
+        }
         recorder.finish()
 
         lock.lock()
@@ -424,6 +461,8 @@ final class DictationEngine {
         sessionID += 1
         guardarRespaldo(final)
         onStateChange?(false)
+
+        log("Grabación finalizada: \(buffersReceivedInSession) buffers procesados")
 
         // Si Apple Speech no capturó texto pero hay audio grabado, intentamos Whisper como rescate
         if final.isEmpty && FileManager.default.fileExists(atPath: tempAudioURL.path) {
@@ -450,8 +489,13 @@ final class DictationEngine {
         cycleTimer?.invalidate()
         cycleTimer = nil
         sessionID += 1
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
+
+        if let eng = engine {
+            eng.stop()
+            eng.inputNode.removeTap(onBus: 0)
+            eng.reset()
+            self.engine = nil
+        }
         recorder.finish()
 
         lock.lock()
