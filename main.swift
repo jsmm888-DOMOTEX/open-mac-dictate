@@ -388,11 +388,12 @@ final class DictationEngine {
                 }
 
                 if let error = error {
-                    log("Aviso de reconocimiento: \(error.localizedDescription)")
-                    if self.isRecording {
-                        self.accumulator.commitCurrent()
-                        self.cycleSubtask()
+                    // Silenciar avisos benignos de silencio para no saturar el log ni ciclar en falso
+                    let desc = error.localizedDescription
+                    if !desc.contains("No speech detected") {
+                        log("Aviso de reconocimiento: \(desc)")
                     }
+                    // JAMÁS reiniciar la tarea en bucle por error de silencio mientras el usuario está pausado
                 }
             }
         }
@@ -402,6 +403,8 @@ final class DictationEngine {
         task = t
         lock.unlock()
     }
+
+    private var lastCycleTime: TimeInterval = 0
 
     // Reciclaje preventivo cada 45 segundos para que NUNCA alcance el corte forzado de Apple
     private func scheduleProactiveCycle() {
@@ -416,6 +419,11 @@ final class DictationEngine {
 
     private func cycleSubtask() {
         guard isRecording, let recognizer = recognizer else { return }
+
+        // Protección antirrebote: mínimo 3 segundos entre reciclajes de sub-tarea
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastCycleTime < 3.0 { return }
+        lastCycleTime = now
 
         lock.lock()
         let oldReq = request
