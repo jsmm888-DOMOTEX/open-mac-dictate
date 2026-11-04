@@ -285,20 +285,6 @@ final class DictationEngine {
                 break
             }
         }
-
-        // Monitorear cambios de hardware de audio (desconexión, reposo/wake, AirPods)
-        NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] _ in
-            log("CoreAudio reportó cambio de configuración de audio (wake/reposo/dispositivo)")
-            guard let self = self, self.isRecording else { return }
-            // Si estábamos grabando en medio de un cambio de ruta, reiniciar motor
-            log("Reiniciando captura tras cambio de hardware de audio en vivo...")
-            self.recoverAudioEngine()
-        }
-    }
-
-    private func recoverAudioEngine() {
-        guard isRecording, let recognizer = recognizer else { return }
-        cycleSubtask()
     }
 
     func start(continuationText: String? = nil) throws {
