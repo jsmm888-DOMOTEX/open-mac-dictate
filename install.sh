@@ -1,87 +1,57 @@
 #!/bin/zsh
-# ==============================================================================
-# OpenMacDictate (Dictado Domotex) — Installer Script
-# Fast, infinite, on-device native voice dictation for macOS (Apple Silicon & Intel)
-# ==============================================================================
-
+# Compila e instala Dictado Domotex v5.0 en ~/Applications y lo deja arrancando con el Mac.
 set -e
+cd "$(dirname "$0")"
 
-echo "🚀 Building OpenMacDictate..."
+APP="$HOME/Applications/Dictado Domotex.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-APP_DIR="$HOME/Applications/OpenMacDictate.app"
-BIN_DIR="$APP_DIR/Contents/MacOS"
-RES_DIR="$APP_DIR/Contents/Resources"
-
-mkdir -p "$BIN_DIR" "$RES_DIR"
-
-cat > "$APP_DIR/Contents/Info.plist" <<'EOF'
+cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleIdentifier</key>
-    <string>co.domotex.openmacdictate</string>
-    <key>CFBundleName</key>
-    <string>OpenMacDictate</string>
-    <key>CFBundleExecutable</key>
-    <string>OpenMacDictate</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>4.1</string>
-    <key>CFBundleVersion</key>
-    <string>4.1.0</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Microphone access is required for local speech-to-text dictation.</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Apple Speech framework is used on-device to transcribe your voice locally.</string>
-</dict>
-</plist>
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>co.domotex.dictado</string>
+  <key>CFBundleName</key><string>Dictado Domotex</string>
+  <key>CFBundleExecutable</key><string>DictadoDomotex</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>5.0</string>
+  <key>CFBundleVersion</key><string>5</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Para escuchar tu voz y escribir lo que dictas en cualquier ventana con Whisper MLX.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Para convertir tu voz en texto continuo en tiempo real.</string>
+</dict></plist>
 EOF
 
-# Compile Swift binary with optimizations
-swiftc -O -swift-version 5 main.swift \
-    -o "$BIN_DIR/OpenMacDictate" \
-    -framework Cocoa \
-    -framework Speech \
-    -framework AVFoundation \
-    -framework Carbon
+# Copiar el daemon de Whisper a Resources
+cp whisper_daemon.py "$APP/Contents/Resources/whisper_daemon.py"
+chmod +x "$APP/Contents/Resources/whisper_daemon.py"
 
-# Code sign with a stable designated requirement
-codesign --force --deep -s - "$APP_DIR"
-
-# Set up launch-on-login agent
-PLIST="$HOME/Library/LaunchAgents/co.domotex.openmacdictate.plist"
-cat > "$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>co.domotex.openmacdictate</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/bin/open</string>
-        <string>-a</string>
-        <string>$APP_DIR</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-</dict>
-</plist>
-EOF
-
-launchctl unload "$PLIST" 2>/dev/null || true
-launchctl load "$PLIST" 2>/dev/null || true
-
-# Restart running instance
-pkill -x OpenMacDictate 2>/dev/null || true
+pkill -x DictadoDomotex 2>/dev/null || true
 sleep 0.5
-open "$APP_DIR"
 
-echo "✅ OpenMacDictate installed and running successfully!"
-echo "🎙 Shortcut: Press [Control + Option + Space] or click the menu bar mic icon."
+echo "Compilando Dictado Domotex v5.0 (Swift 5 + Carbon + AVFoundation + Speech)..."
+swiftc -O -swift-version 5 main.swift -o "$APP/Contents/MacOS/DictadoDomotex" \
+  -framework Cocoa -framework Speech -framework AVFoundation -framework Carbon
+
+# Firma con requerimiento designado estable para que TCC preserve permisos de Accesibilidad
+codesign --force --deep -s - -r='designated => identifier "co.domotex.dictado"' "$APP"
+
+# Arranque automático al iniciar sesión de usuario
+PL="$HOME/Library/LaunchAgents/co.domotex.dictado.plist"
+cat > "$PL" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>co.domotex.dictado</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-a</string><string>$APP</string></array>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+EOF
+
+launchctl unload "$PL" 2>/dev/null || true
+launchctl load "$PL"
+
+sleep 0.5
+open "$APP"
+echo "OK: Dictado Domotex v5.0 (Titanio) instalado y en ejecución"
