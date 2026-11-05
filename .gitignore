@@ -4,3 +4,5 @@
 *.dSYM/
 OpenMacDictate
 /tmp/
+__pycache__/
+*.pyc

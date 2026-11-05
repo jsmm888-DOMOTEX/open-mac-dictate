@@ -1,16 +1,18 @@
-// Dictado Domotex v5.5 — Edición Titanio Turbo & Anti-Ruido DSP
+// Dictado Domotex v5.6 — Edición Titanio Turbo & Anti-Ruido DSP con Blindaje VAD
 // Diseñado para el Ingeniero Sebastián Muñoz (macOS Tahoe / Sequoia / Apple Silicon)
 //
 // ARQUITECTURA:
 // 1. Grabación Pura PCM Hardware: Basado en AVAudioRecorder / CoreAudio HAL directo.
 //    Cero dependencias de grafos de audio inestables. Cero bloqueos con auriculares Bluetooth (Sony WH-1000XM5, AirPods).
 // 2. Transcripción Instantánea con Whisper MLX Daemon: Motor residente en memoria GPU Metal (Large v3 Turbo + Silero VAD)
-//    que transcribe audios de cualquier duración en < 0.8s con filtrado acústico contra música y ruido de fondo.
-// 3. Cero Límites de Tiempo: Habla 5 segundos, 1 minuto, 5 minutos o media hora. El audio NUNCA se corta.
-// 4. Medidor VU en Vivo: Visualizador de audio dinámico y cronómetro en el HUD flotante superior.
-// 5. Triple Redundancia de Transcripción: Daemon Socket -> Whisper MLX CLI -> Apple SFSpeechURL.
-// 6. Respaldo Físico Perpetuo: Cada dictado queda guardado en ~/Library/Logs/UltimoDictado.wav y UltimoDictado.txt.
-// 7. Atajos: Control + Opción + Espacio, Tecla F8, Clic en barra de menú, y ⌥⌘N para re-pegar.
+//    que transcribe audios de cualquier duración con protocolo estructurado JSON y filtrado acústico contra ruido/música.
+// 3. Blindaje de Portapapeles y Respaldo: Validación estricta que previene sobrescribir el portapapeles o UltimoDictado.txt
+//    con puntos o silencio si se pulsa accidentalmente el atajo.
+// 4. Activación Forzada de Ventana y Delay Calibrado: target.activate(options: .activateIgnoringOtherApps) y 280ms de espera.
+// 5. Cero Límites de Tiempo: Habla 5 segundos, 1 minuto, 5 minutos o media hora. El audio NUNCA se corta.
+// 6. Medidor VU en Vivo y Feedback de Espera: Visualizador de audio y aviso durante transcripciones de audios largos.
+// 7. Triple Redundancia: Daemon Socket -> Whisper MLX CLI -> Apple SFSpeechURL.
+// 8. Atajos: Control + Opción + Espacio, Tecla F8, Clic en barra de menú, y ⌥⌘N para re-pegar.
 
 import Cocoa
 import AVFoundation
@@ -37,8 +39,26 @@ func log(_ s: String) {
     }
 }
 
+func isValidText(_ text: String) -> Bool {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return false }
+
+    // Contar caracteres alfanuméricos reales
+    let alphanumericCount = trimmed.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count
+    guard alphanumericCount >= 2 else { return false }
+
+    // Rechazar cadenas compuestas exclusivamente de signos de puntuación y espacios
+    let nonPunctuation = trimmed.trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.whitespacesAndNewlines))
+    guard !nonPunctuation.isEmpty else { return false }
+
+    return true
+}
+
 func guardarRespaldoTexto(_ text: String) {
-    guard !text.isEmpty else { return }
+    guard isValidText(text) else {
+        log("guardarRespaldoTexto: Texto descartado por no contener palabras válidas ('\(text)')")
+        return
+    }
     try? text.write(to: backupTextURL, atomically: true, encoding: .utf8)
     let pb = NSPasteboard.general
     pb.clearContents()
@@ -141,6 +161,7 @@ final class AudioCaptureEngine: NSObject, AVAudioRecorderDelegate {
     private var meterTimer: Timer?
     private var startTime: Date?
     private(set) var isRecording = false
+    private(set) var lastRecordingDuration: TimeInterval = 0
 
     var onMeterUpdate: ((_ vuString: String, _ elapsedStr: String, _ sizeStr: String) -> Void)?
     var onStateChange: ((Bool) -> Void)?
@@ -174,6 +195,7 @@ final class AudioCaptureEngine: NSObject, AVAudioRecorderDelegate {
         self.recorder = rec
         self.isRecording = true
         self.startTime = Date()
+        self.lastRecordingDuration = 0
         self.vuHistory = [0, 0, 0, 0, 0, 0]
 
         onStateChange?(true)
@@ -230,21 +252,20 @@ final class AudioCaptureEngine: NSObject, AVAudioRecorderDelegate {
     func stop() -> URL? {
         guard isRecording else { return nil }
         isRecording = false
+        lastRecordingDuration = Date().timeIntervalSince(self.startTime ?? Date())
         stopRecordingCleanup()
         onStateChange?(false)
 
         let exists = FileManager.default.fileExists(atPath: tempAudioURL.path)
         let size = (try? FileManager.default.attributesOfItem(atPath: tempAudioURL.path)[.size] as? Int64) ?? 0
-        log("Captura de audio finalizada. Archivo: \(size) bytes.")
+        log("Captura de audio finalizada: \(String(format: "%.2f", lastRecordingDuration))s (\(size) bytes)")
 
-        guard exists, size > 1500 else {
-            log("Aviso: Archivo de audio vacío o inexistente")
+        // Descartar grabaciones accidentales de menos de 0.4s o menos de 10 KB
+        guard exists, lastRecordingDuration >= 0.4, size >= 10000 else {
+            log("Aviso: Audio descartado por ser demasiado corto (\(String(format: "%.2f", lastRecordingDuration))s, \(size) bytes)")
+            try? FileManager.default.removeItem(at: tempAudioURL)
             return nil
         }
-
-        // Respaldo perpetuo del audio físico
-        try? FileManager.default.removeItem(at: backupAudioURL)
-        try? FileManager.default.copyItem(at: tempAudioURL, to: backupAudioURL)
 
         return tempAudioURL
     }
@@ -267,6 +288,28 @@ final class AudioCaptureEngine: NSObject, AVAudioRecorderDelegate {
 }
 
 // MARK: - Cliente y Supervisor del Whisper MLX Daemon
+struct DaemonResponse: Decodable {
+    let status: String
+    let text: String?
+    let reason: String?
+    let duration: Double?
+    let inference_time: Double?
+    let message: String?
+}
+
+enum SocketResult {
+    case success(text: String, duration: Double, inferenceTime: Double)
+    case noSpeech(reason: String)
+    case error(message: String)
+    case socketUnavailable
+}
+
+enum TranscriptionOutcome {
+    case success(String)
+    case noSpeech(String)
+    case failure(String)
+}
+
 final class WhisperSupervisor {
     private var daemonProcess: Process?
 
@@ -356,38 +399,64 @@ final class WhisperSupervisor {
         return false
     }
 
-    func transcribe(audioURL: URL, completion: @escaping (String) -> Void) {
+    func transcribe(audioURL: URL, completion: @escaping (TranscriptionOutcome) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
             // Intento 1: Vía Socket UNIX con el Daemon residente (Latencia < 0.3s)
-            if let text = self?.transcribeViaSocket(audioPath: audioURL.path), !text.isEmpty {
-                DispatchQueue.main.async { completion(text) }
+            let socketRes = self.transcribeViaSocket(audioPath: audioURL.path)
+            switch socketRes {
+            case .success(let text, _, _):
+                DispatchQueue.main.async { completion(.success(text)) }
+                return
+
+            case .noSpeech(let reason):
+                log("Daemon determinó no_speech (razón: \(reason)). Omitiendo fallback para evitar alucinaciones.")
+                DispatchQueue.main.async { completion(.noSpeech(reason)) }
+                return
+
+            case .error(let msg):
+                log("Aviso: Daemon retornó error: \(msg). Verificando si procede fallback...")
+
+            case .socketUnavailable:
+                log("Aviso: Socket del daemon no respondió o no está disponible.")
+            }
+
+            // Intento 2: Invocación directa del CLI de mlx_whisper (solo para audios válidos >= 30 KB)
+            let size = (try? FileManager.default.attributesOfItem(atPath: audioURL.path)[.size] as? Int64) ?? 0
+            if size >= 30000 {
+                log("Intentando con mlx_whisper CLI directo (audio: \(size) bytes)...")
+                if let text = self.transcribeViaCLI(audioPath: audioURL.path), isValidText(text) {
+                    DispatchQueue.main.async { completion(.success(text)) }
+                    return
+                }
+            } else {
+                log("Audio menor a 30 KB (\(size) bytes). Omitiendo fallback CLI para evitar alucinaciones.")
+                DispatchQueue.main.async { completion(.noSpeech("audio_too_small")) }
                 return
             }
 
-            // Intento 2: Invocación directa del CLI de mlx_whisper
-            log("Aviso: Socket no respondió. Intentando con mlx_whisper CLI directo...")
-            if let text = self?.transcribeViaCLI(audioPath: audioURL.path), !text.isEmpty {
-                DispatchQueue.main.async { completion(text) }
-                return
-            }
-
-            // Intento 3: Respaldo con Apple SFSpeechURLRecognitionRequest sobre el archivo WAV físico
-            log("Aviso: MLX no disponible. Intentando respaldo final con Apple Speech URL...")
-            self?.transcribeViaAppleSpeech(audioURL: audioURL) { text in
-                DispatchQueue.main.async { completion(text) }
+            // Intento 3: Respaldo con Apple SFSpeechURLRecognitionRequest
+            log("Aviso: MLX no disponible. Intentando respaldo con Apple Speech URL...")
+            self.transcribeViaAppleSpeech(audioURL: audioURL) { text in
+                if isValidText(text) {
+                    DispatchQueue.main.async { completion(.success(text)) }
+                } else {
+                    DispatchQueue.main.async { completion(.noSpeech("apple_speech_empty")) }
+                }
             }
         }
     }
 
-    private func transcribeViaSocket(audioPath: String) -> String? {
+    private func transcribeViaSocket(audioPath: String) -> SocketResult {
         ensureDaemonRunning()
 
         let s = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard s >= 0 else { return nil }
+        guard s >= 0 else { return .socketUnavailable }
         defer { close(s) }
 
-        // Timeout de 25 segundos para grabaciones largas
-        var tv = timeval(tv_sec: 25, tv_usec: 0)
+        // Timeout de 60 segundos para grabaciones largas
+        var tv = timeval(tv_sec: 60, tv_usec: 0)
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
@@ -409,14 +478,19 @@ final class WhisperSupervisor {
             }
         }
 
-        guard connectRes == 0 else { return nil }
+        guard connectRes == 0 else { return .socketUnavailable }
 
-        let msg = audioPath + "\n"
-        guard let data = msg.data(using: .utf8) else { return nil }
+        let reqDict = ["action": "transcribe", "audio_path": audioPath]
+        guard let reqData = try? JSONSerialization.data(withJSONObject: reqDict),
+              let reqStr = String(data: reqData, encoding: .utf8) else {
+            return .socketUnavailable
+        }
+        let msg = reqStr + "\n"
+        guard let data = msg.data(using: .utf8) else { return .socketUnavailable }
         let sent = data.withUnsafeBytes { ptr in
             send(s, ptr.baseAddress!, data.count, 0)
         }
-        guard sent > 0 else { return nil }
+        guard sent > 0 else { return .socketUnavailable }
 
         var resultData = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
@@ -426,12 +500,33 @@ final class WhisperSupervisor {
             resultData.append(buffer, count: bytesRead)
         }
 
-        let result = String(data: resultData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return result?.isEmpty == false ? result : nil
+        if let json = try? JSONDecoder().decode(DaemonResponse.self, from: resultData) {
+            if json.status == "ok", let t = json.text, isValidText(t) {
+                return .success(text: t, duration: json.duration ?? 0, inferenceTime: json.inference_time ?? 0)
+            } else if json.status == "no_speech" {
+                return .noSpeech(reason: json.reason ?? "vad_gate")
+            } else if json.status == "error" {
+                return .error(message: json.message ?? "daemon_error")
+            } else {
+                return .noSpeech(reason: "unrecognized_status")
+            }
+        }
+
+        let rawStr = String(data: resultData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if rawStr.isEmpty {
+            return .noSpeech(reason: "empty_socket_response")
+        }
+        if isValidText(rawStr) {
+            return .success(text: rawStr, duration: 0, inferenceTime: 0)
+        }
+        return .noSpeech(reason: "invalid_raw_text")
     }
 
     private func transcribeViaCLI(audioPath: String) -> String? {
         guard FileManager.default.isExecutableFile(atPath: whisperCLIPath) else { return nil }
+        let size = (try? FileManager.default.attributesOfItem(atPath: audioPath)[.size] as? Int64) ?? 0
+        guard size >= 30000 else { return nil }
+
         let p = Process()
         p.executableURL = URL(fileURLWithPath: whisperCLIPath)
         p.arguments = [
@@ -453,7 +548,10 @@ final class WhisperSupervisor {
             p.waitUntilExit()
             let txtFile = URL(fileURLWithPath: "/tmp/dictado_actual.txt")
             if let str = try? String(contentsOf: txtFile, encoding: .utf8) {
-                return str.trimmingCharacters(in: .whitespacesAndNewlines)
+                let clean = str.trimmingCharacters(in: .whitespacesAndNewlines)
+                if isValidText(clean) {
+                    return clean
+                }
             }
         } catch {
             log("Error en CLI Whisper: \(error.localizedDescription)")
@@ -462,6 +560,12 @@ final class WhisperSupervisor {
     }
 
     private func transcribeViaAppleSpeech(audioURL: URL, completion: @escaping (String) -> Void) {
+        let size = (try? FileManager.default.attributesOfItem(atPath: audioURL.path)[.size] as? Int64) ?? 0
+        guard size >= 30000 else {
+            completion("")
+            return
+        }
+
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "es-CO")), recognizer.isAvailable else {
             completion("")
             return
@@ -473,7 +577,8 @@ final class WhisperSupervisor {
 
         recognizer.recognitionTask(with: request) { res, err in
             if let res = res, res.isFinal {
-                completion(res.bestTranscription.formattedString)
+                let str = res.bestTranscription.formattedString
+                completion(isValidText(str) ? str : "")
             } else if err != nil {
                 completion("")
             }
@@ -573,7 +678,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
 
         askPermissions()
-        log("Dictado Domotex v5.5 iniciado (Titanio Turbo: Grabación PCM Directa + Whisper Large v3 Turbo en GPU Metal + Anti-Ruido DSP)")
+        log("Dictado Domotex v5.6 iniciado (Titanio Turbo: Grabación PCM Directa + Whisper Large v3 Turbo en GPU Metal + Anti-Ruido DSP + Blindaje VAD)")
     }
 
     @objc func statusBarButtonClicked(_ sender: NSStatusBarButton) {
@@ -631,15 +736,26 @@ final class App: NSObject, NSApplicationDelegate {
 
     @objc func toggle() {
         let now = ProcessInfo.processInfo.systemUptime
-        if now - lastToggleUptime < 0.30 { return }
+        if now - lastToggleUptime < 0.35 { return }
         lastToggleUptime = now
 
-        if busy { return }
+        if busy {
+            log("Atajo presionado mientras el sistema está transcribiendo. Mostrando aviso de espera.")
+            NSSound(named: "Tink")?.play()
+            overlay.update(
+                status: "⏳ Procesando tu dictado anterior, un momento...",
+                text: "El modelo está transcribiendo en GPU Metal. Por favor espera a que termine.",
+                dotIcon: "🟡"
+            )
+            return
+        }
+
         audio.isRecording ? finish() : begin()
     }
 
     func begin() {
         targetApp = NSWorkspace.shared.frontmostApplication
+        log("Iniciando dictado. App destino: \(targetApp?.localizedName ?? "Desconocida") (\(targetApp?.bundleIdentifier ?? "sin bundle"))")
         do {
             try audio.start()
             NSSound(named: "Tink")?.play()
@@ -657,49 +773,95 @@ final class App: NSObject, NSApplicationDelegate {
     func finish() {
         busy = true
         setIcon(recording: false, processing: true)
-        overlay.update(status: "⚡ Transcribiendo con Whisper MLX Turbo...",
-                       text: "Procesando audio en GPU Metal con filtro acústico anti-ruido...",
-                       stats: "⚡ Ultra-rápido",
-                       dotIcon: "🟡")
 
         guard let recordedWAV = audio.stop() else {
             busy = false
             setIcon(recording: false, processing: false)
-            overlay.update(status: "⚠️ Audio vacío o demasiado corto", text: "", dotIcon: "⚪")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.overlay.hide() }
+            overlay.update(status: "⚪ Grabación demasiado corta", text: "Habla al menos 1 segundo.", dotIcon: "⚪")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { self.overlay.hide() }
             return
         }
 
-        whisper.transcribe(audioURL: recordedWAV) { [weak self] text in
+        let durationSec = audio.lastRecordingDuration
+        let mins = Int(durationSec) / 60
+        let secs = Int(durationSec) % 60
+        let durationStr = String(format: "%02d:%02d", mins, secs)
+
+        let statusHeader: String
+        let statusDetail: String
+        if durationSec >= 30 {
+            let timeStr = mins > 0 ? "\(mins)m \(secs)s" : "\(secs)s"
+            statusHeader = "⚡ Transcribiendo audio de \(timeStr)..."
+            statusDetail = "⏳ Transcripción en curso con Whisper MLX Turbo... por favor espera un momento"
+        } else {
+            statusHeader = "⚡ Transcribiendo (\(durationStr))..."
+            statusDetail = "Procesando audio en GPU Metal con filtro acústico anti-ruido..."
+        }
+
+        overlay.update(status: statusHeader,
+                       text: statusDetail,
+                       stats: "⚡ MLX Turbo",
+                       dotIcon: "🟡")
+
+        whisper.transcribe(audioURL: recordedWAV) { [weak self] outcome in
             guard let self = self else { return }
             self.busy = false
             self.setIcon(recording: false, processing: false)
-            NSSound(named: "Pop")?.play()
 
-            let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            log("Transcripción completada: \"\(cleanText.prefix(60))...\" (\(cleanText.count) caracteres)")
+            switch outcome {
+            case .success(let text):
+                let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard isValidText(cleanText) else {
+                    log("Aviso: Transcripción recibida pero no contiene texto alfanumérico válido: '\(cleanText)'")
+                    self.overlay.update(status: "⚪ No se detectaron palabras", text: "", dotIcon: "⚪")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { self.overlay.hide() }
+                    return
+                }
 
-            if !cleanText.isEmpty {
+                // Preservar respaldo físico del audio exitoso
+                try? FileManager.default.removeItem(at: backupAudioURL)
+                try? FileManager.default.copyItem(at: recordedWAV, to: backupAudioURL)
+
+                NSSound(named: "Pop")?.play()
+                log("Transcripción exitosa: \"\(cleanText.prefix(60))...\" (\(cleanText.count) caracteres)")
                 self.paste(cleanText)
-            } else {
-                self.overlay.update(status: "⚠️ No se detectaron palabras en el audio", text: "", dotIcon: "⚪")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { self.overlay.hide() }
+
+            case .noSpeech(let reason):
+                log("Cero voz detectada en audio (\(reason)). Preservando portapapeles y archivo de respaldo.")
+                self.overlay.update(status: "⚪ No se detectó voz",
+                                    text: "No se identificaron palabras claras. Tu portapapeles previo se mantiene intacto.",
+                                    dotIcon: "⚪")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { self.overlay.hide() }
+
+            case .failure(let err):
+                log("Error en transcripción: \(err)")
+                self.overlay.update(status: "⚠️ Error en transcripción", text: err, dotIcon: "🔴")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { self.overlay.hide() }
             }
         }
     }
 
     func paste(_ text: String) {
-        guard !text.isEmpty else { return }
+        guard isValidText(text) else {
+            log("paste: Intento de pegar texto inválido ignorado: '\(text)'")
+            return
+        }
         guardarRespaldoTexto(text)
 
         // Devolver el foco a la aplicación donde Sebastián estaba escribiendo
-        if let target = targetApp, target != NSWorkspace.shared.frontmostApplication {
-            target.activate()
+        if let target = targetApp {
+            if #available(macOS 14.0, *) {
+                NSApp.yieldActivation(to: target)
+                target.activate()
+            } else {
+                target.activate(options: .activateIgnoringOtherApps)
+            }
         }
 
         if AXIsProcessTrusted() {
             overlay.update(status: "✅ Pegado en ventana", text: text, stats: "\(text.count) car", dotIcon: "🟢")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            // Delay calibrado de 280ms para permitir al gestor de ventanas de macOS asentar el foco en el campo activo
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
                 let src = CGEventSource(stateID: .combinedSessionState)
                 let down = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true)
                 let up = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
@@ -720,8 +882,13 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     @objc func repaste() {
-        if let s = try? String(contentsOf: backupTextURL, encoding: .utf8), !s.isEmpty {
+        if let s = try? String(contentsOf: backupTextURL, encoding: .utf8), isValidText(s) {
+            log("Re-pegado manual (⌥⌘N): \"\(s.prefix(60))...\" (\(s.count) caracteres)")
             paste(s)
+        } else {
+            log("Re-pegado ignorado: no hay texto válido en \(backupTextURL.path)")
+            overlay.show(status: "⚪ No hay texto previo para pegar")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { self.overlay.hide() }
         }
     }
 }

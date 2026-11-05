@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Whisper MLX Daemon — Dictado Domotex v5.5 (Titanio Turbo & Anti-Ruido DSP)
+Whisper MLX Daemon — Dictado Domotex v5.6 (Titanio Turbo & Anti-Ruido DSP con Blindaje VAD)
 Arquitectura de Audio Acústico & Metal GPU para Apple Silicon.
 
 Diseñado para el Ingeniero Sebastián Muñoz (macOS Tahoe / Sequoia / Apple Silicon).
 Mantiene en memoria residente Whisper Large v3 Turbo en GPU Metal + Silero VAD para
-transcribir cualquier audio en < 0.8s con filtrado acústico de música y ruido de fondo.
+transcribir cualquier audio con filtrado acústico de música y ruido de fondo,
+utilizando un protocolo de comunicación estructurado JSON sobre socket UNIX.
 """
 
 import os
@@ -142,6 +143,8 @@ def clean_transcription(text: str) -> str:
     - Remueve etiquetas sonoras ([Música], (Música), ♪, etc.).
     - Elimina frases residuales de subtítulos de YouTube/Whisper.
     - Colapsa repeticiones patológicas consecutivas.
+    - Colapsa secuencias de puntos o signos repetidos.
+    - Exige al menos 2 caracteres alfanuméricos para evitar emitir puntos o símbolos sueltos.
     """
     if not text:
         return ""
@@ -177,11 +180,17 @@ def clean_transcription(text: str) -> str:
     # 4. Colapsar palabras repetidas 3 o más veces consecutivas ("la la la la" -> "la")
     text = re.sub(r'\b(\w+)(\s+\1){2,}\b', r'\1', text, flags=re.IGNORECASE)
 
-    # 5. Limpieza final de signos sueltos y espacios
+    # 5. Colapsar secuencias de puntos o comas repetidas ("....", "..", ",,")
+    text = re.sub(r'\.{2,}', '.', text)
+    text = re.sub(r',{2,}', ',', text)
+
+    # 6. Limpieza final de signos sueltos y espacios
     text = re.sub(r'^[.,;:¡!¿?\s\-_]+', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
 
-    if re.fullmatch(r'^[.,;:¡!¿?\s\-_]*$', text):
+    # 7. Rechazar cadenas que no contengan al menos 2 caracteres alfanuméricos
+    alphanumeric_count = len(re.findall(r'[a-zA-Z0-9áéíóúÁÉÍÓÚñÑ]', text))
+    if alphanumeric_count < 2:
         return ""
 
     return text
@@ -264,16 +273,38 @@ def main():
                     conn.sendall(b"OK\n")
                     break
 
-                wav_path = raw_data
-                if not os.path.exists(wav_path):
+                wav_path = None
+                if raw_data.startswith("{"):
+                    try:
+                        req = json.loads(raw_data)
+                        action = req.get("action", "transcribe")
+                        if action == "ping":
+                            conn.sendall(b'{"status": "ok", "message": "pong"}\n')
+                            continue
+                        elif action == "stop":
+                            log("Comando STOP recibido vía JSON. Apagando daemon.")
+                            conn.sendall(b'{"status": "ok", "message": "stopping"}\n')
+                            break
+                        wav_path = req.get("audio_path") or req.get("path")
+                    except Exception as e:
+                        log(f"Error parseando JSON entrante: {e}")
+                        resp = {"status": "error", "message": f"JSON inválido: {e}", "text": ""}
+                        conn.sendall(json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n")
+                        continue
+                else:
+                    wav_path = raw_data
+
+                if not wav_path or not os.path.exists(wav_path):
                     log(f"Error: Archivo de audio no encontrado: {wav_path}")
-                    conn.sendall(b"")
+                    resp = {"status": "error", "message": f"Archivo no encontrado: {wav_path}", "text": ""}
+                    conn.sendall(json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n")
                     continue
 
                 file_size = os.path.getsize(wav_path)
-                if file_size < 1000:
+                if file_size < 3000:
                     log(f"Audio demasiado corto ({file_size} bytes). Descartando.")
-                    conn.sendall(b"")
+                    resp = {"status": "no_speech", "reason": "file_size_too_small", "duration": 0.0, "text": ""}
+                    conn.sendall(json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n")
                     continue
 
                 t_start = time.time()
@@ -281,9 +312,10 @@ def main():
                 # 1. Carga de audio en memoria
                 sr, audio = load_audio_16k(wav_path)
                 duration = len(audio) / sr
-                if duration < 0.2:
-                    log(f"Duración de audio nula ({duration:.2f}s). Descartando.")
-                    conn.sendall(b"")
+                if duration < 0.3:
+                    log(f"Duración de audio nula o ínfima ({duration:.2f}s). Descartando.")
+                    resp = {"status": "no_speech", "reason": "duration_too_short", "duration": round(duration, 2), "text": ""}
+                    conn.sendall(json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n")
                     continue
 
                 # 2. Pre-procesamiento DSP: Filtro paso banda acústico (80 Hz - 7500 Hz)
@@ -307,7 +339,13 @@ def main():
                     if not ts:
                         log(f"VAD Gate: Cero voz detectada en {duration:.1f}s (DSP: {dsp_ms:.1f}ms, VAD: {vad_ms:.1f}ms). "
                             "Bloqueando para evitar alucinaciones con música/silencio.")
-                        conn.sendall(b"")
+                        resp = {
+                            "status": "no_speech",
+                            "reason": "vad_gate",
+                            "duration": round(duration, 2),
+                            "text": ""
+                        }
+                        conn.sendall(json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n")
                         continue
 
                     speech_dur = sum([(s['end'] - s['start']) for s in ts]) / sr
@@ -343,13 +381,31 @@ def main():
                     final_text = clean_transcription(raw_text)
                     total_time = time.time() - t_start
 
-                    log(f"Completado en {total_time:.3f}s (Inferencia: {infer_time:.3f}s): "
-                        f"\"{final_text[:80]}...\" ({len(final_text)} car)")
+                    alphanumeric_count = len(re.findall(r'[a-zA-Z0-9áéíóúÁÉÍÓÚñÑ]', final_text))
+                    if not final_text or alphanumeric_count < 2:
+                        log(f"Descartado post-inferencia por falta de palabras reales: \"{raw_text}\" -> \"{final_text}\"")
+                        resp = {
+                            "status": "no_speech",
+                            "reason": "transcription_empty_or_symbols_only",
+                            "duration": round(duration, 2),
+                            "inference_time": round(infer_time, 3),
+                            "text": ""
+                        }
+                    else:
+                        log(f"Completado en {total_time:.3f}s (Inferencia: {infer_time:.3f}s): "
+                            f"\"{final_text[:80]}...\" ({len(final_text)} car)")
+                        resp = {
+                            "status": "ok",
+                            "text": final_text,
+                            "duration": round(duration, 2),
+                            "inference_time": round(infer_time, 3)
+                        }
 
-                    conn.sendall(final_text.encode("utf-8"))
+                    conn.sendall(json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n")
                 except Exception as e:
                     log(f"Error en transcripción MLX Turbo: {e}")
-                    conn.sendall(b"")
+                    resp = {"status": "error", "message": str(e), "text": ""}
+                    conn.sendall(json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n")
 
         except Exception as e:
             log(f"Aviso en bucle de socket: {e}")
