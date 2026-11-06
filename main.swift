@@ -8,7 +8,7 @@
 //    que transcribe audios de cualquier duración con protocolo estructurado JSON y filtrado acústico contra ruido/música.
 // 3. Blindaje de Portapapeles y Respaldo: Validación estricta que previene sobrescribir el portapapeles o UltimoDictado.txt
 //    con puntos o silencio si se pulsa accidentalmente el atajo.
-// 4. Activación Forzada de Ventana y Delay Calibrado: target.activate(options: .activateIgnoringOtherApps) y 280ms de espera.
+// 4. Blindaje Cero Volteo de Pantalla (06-Nov-2026): Cero activación forzada; respeta 100% el escritorio/pantalla donde Sebastián esté trabajando.
 // 5. Cero Límites de Tiempo: Habla 5 segundos, 1 minuto, 5 minutos o media hora. El audio NUNCA se corta.
 // 6. Medidor VU en Vivo y Feedback de Espera: Visualizador de audio y aviso durante transcripciones de audios largos.
 // 7. Triple Redundancia: Daemon Socket -> Whisper MLX CLI -> Apple SFSpeechURL.
@@ -848,20 +848,19 @@ final class App: NSObject, NSApplicationDelegate {
         }
         guardarRespaldoTexto(text)
 
-        // Devolver el foco a la aplicación donde Sebastián estaba escribiendo
-        if let target = targetApp {
-            if #available(macOS 14.0, *) {
-                NSApp.yieldActivation(to: target)
-                target.activate()
-            } else {
-                target.activate(options: .activateIgnoringOtherApps)
-            }
-        }
+        // BLINDAJE CERO VOLTEO DE PANTALLA (Directriz Sebastián Muñoz, 06-Nov-2026):
+        // NUNCA forzamos la activación con target.activate() porque en macOS eso provoca que
+        // si Sebastián cambió de Space / Pantalla mientras hablaba, el sistema operativo
+        // "voltee la pantalla" regresando a la aplicación anterior.
+        // Al ser DictadoDomotex una aplicación accesoria (.accessory) sin foco,
+        // la aplicación y campo de texto donde Sebastián está mirando AHORA conserva el foco.
+        let currentApp = NSWorkspace.shared.frontmostApplication
+        log("Pegando texto sin cambiar de pantalla. App activa actual: \(currentApp?.localizedName ?? "Ninguna") (App al inicio: \(targetApp?.localizedName ?? "Ninguna"))")
 
         if AXIsProcessTrusted() {
             overlay.update(status: "✅ Pegado en ventana", text: text, stats: "\(text.count) car", dotIcon: "🟢")
-            // Delay calibrado de 280ms para permitir al gestor de ventanas de macOS asentar el foco en el campo activo
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+            // Delay ultra-rápido de 120ms para asentar el texto en el portapapeles sin esperas innecesarias
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
                 let src = CGEventSource(stateID: .combinedSessionState)
                 let down = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true)
                 let up = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
