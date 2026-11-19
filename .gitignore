@@ -1,0 +1,17 @@
+.DS_Store
+*.app/
+*.o
+*.dSYM/
+*.bak
+*.log
+*.wav
+*.txt
+!requirements.txt
+.venv/
+venv/
+OpenMacDictate
+DictadoDomotex
+vocabulario_local.json
+/tmp/
+__pycache__/
+*.pyc

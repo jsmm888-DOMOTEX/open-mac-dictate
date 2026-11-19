@@ -1,0 +1,10 @@
+{
+  "initial_prompt": "Transcripción técnica en español e inglés para ingeniería, desarrollo de software, GitHub, Python, Swift, VS Code y arquitectura en Mac.",
+  "reemplazos": [
+    {
+      "patron": "\\b(?:ejemplo\\s+empresa)\\b",
+      "reemplazo": "Ejemplo Empresa",
+      "flags": "i"
+    }
+  ]
+}
