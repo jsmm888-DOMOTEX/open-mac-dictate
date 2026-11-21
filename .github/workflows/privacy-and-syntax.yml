@@ -1,0 +1,27 @@
+name: Privacy & Syntax Guard
+
+on:
+  push:
+    branches: ["main", "var/**", "feat/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  check-privacy-and-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Python syntax
+        run: python3 -m py_compile whisper_daemon.py
+
+      - name: Validate example JSON
+        run: python3 -m json.tool vocabulario_local.example.json >/dev/null
+
+      - name: Scan for personal paths, emails, or PII
+        run: |
+          if git grep -nE '(/Users/[a-zA-Z0-9._-]+|@gmail\.com|@hotmail\.com|@outlook\.com)' -- ':!.github/workflows/privacy-and-syntax.yml'; then
+            echo "ERROR: Personal path or email detected in tracked files."
+            exit 1
+          fi
+          echo "OK: Zero personal paths or emails found."
