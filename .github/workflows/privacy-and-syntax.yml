@@ -20,7 +20,7 @@ jobs:
 
       - name: Scan for personal paths, emails, or PII
         run: |
-          if git grep -nE '(/Users/[a-zA-Z0-9._-]+|@gmail\.com|@hotmail\.com|@outlook\.com)' -- ':!.github/workflows/privacy-and-syntax.yml'; then
+          if git grep -nE '(/Users/[a-zA-Z0-9._-]+|@gmail\.com|@hotmail\.com|@outlook\.com|@[A-Za-z0-9-]*MacBook[A-Za-z0-9.-]*\.local)' -- ':!.github/workflows/privacy-and-syntax.yml'; then
             echo "ERROR: Personal path or email detected in tracked files."
             exit 1
           fi

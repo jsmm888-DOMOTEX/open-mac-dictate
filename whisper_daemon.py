@@ -647,8 +647,7 @@ def main():
                             "text": ""
                         }
                     else:
-                        log(f"Completado en {total_time:.3f}s (Inferencia: {infer_time:.3f}s): "
-                            f"\"{final_text[:80]}...\" ({len(final_text)} car)")
+                        log(f"Completado en {total_time:.3f}s (Inferencia: {infer_time:.3f}s): {len(final_text)} caracteres")
                         resp = {
                             "status": "ok",
                             "text": final_text,

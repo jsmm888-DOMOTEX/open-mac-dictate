@@ -252,7 +252,7 @@ final class Overlay {
         let screens = NSScreen.screens
         guard !screens.isEmpty else { return NSScreen.main }
 
-        // Prioridad 1: Pantalla donde vive la ventana enfocada donde Sebas está dictando
+        // Prioridad 1: Pantalla donde vive la ventana enfocada donde el usuario está dictando
         if let winRect = activeWindowCocoaRect(for: app) {
             let winCenter = NSPoint(x: winRect.midX, y: winRect.midY)
             if let centerScreen = screens.first(where: { NSMouseInRect(winCenter, $0.frame, false) }) {
@@ -836,6 +836,7 @@ final class App: NSObject, NSApplicationDelegate {
     var lastToggleUptime: TimeInterval = 0
     var targetApp: NSRunningApplication?
     var lastExternalApp: NSRunningApplication?
+    var lastTranscribedText: String = ""
 
     let HK_SPACE: UInt32 = 1
     let HK_F8: UInt32 = 2
@@ -893,7 +894,7 @@ final class App: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Atajo Principal Exigido por Sebastián: Control + Opción + Barra Espaciadora
+        // Atajo Principal: Control + Opción + Barra Espaciadora
         hotkeys.register(id: HK_SPACE, key: kVK_Space, mods: controlKey | optionKey)
         // Atajo Secundario Directo: Tecla F8
         hotkeys.register(id: HK_F8, key: kVK_F8, mods: 0)
@@ -1058,24 +1059,30 @@ final class App: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             self.busy = false
             self.setIcon(recording: false, processing: false)
+            defer { try? FileManager.default.removeItem(at: recordedWAV) }
 
             switch outcome {
             case .success(let text):
                 let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard isValidText(cleanText) else {
-                    log("Aviso: Transcripción recibida pero no contiene texto alfanumérico válido: '\(cleanText)'")
+                    log("Aviso: Transcripción recibida pero no contiene texto alfanumérico válido (\(cleanText.count) caracteres)")
                     self.overlay.update(status: "⚪ No se detectaron palabras", text: "", dotIcon: "⚪")
                     self.overlay.scheduleHide(after: 1.8)
                     return
                 }
 
+                self.lastTranscribedText = cleanText
                 if saveLastDictationHistory {
                     try? FileManager.default.removeItem(at: backupAudioURL)
                     try? FileManager.default.copyItem(at: recordedWAV, to: backupAudioURL)
                 }
 
                 NSSound(named: "Pop")?.play()
-                log("Transcripción exitosa: \"\(cleanText.prefix(60))...\" (\(cleanText.count) caracteres)")
+                if saveLastDictationHistory {
+                    log("Transcripción exitosa: \"\(cleanText.prefix(60))...\" (\(cleanText.count) caracteres)")
+                } else {
+                    log("Transcripción exitosa (\(cleanText.count) caracteres)")
+                }
                 self.paste(cleanText)
 
             case .noSpeech(let reason):
@@ -1095,13 +1102,13 @@ final class App: NSObject, NSApplicationDelegate {
 
     func paste(_ text: String) {
         guard isValidText(text) else {
-            log("paste: Intento de pegar texto inválido ignorado: '\(text)'")
+            log("paste: Intento de pegar texto inválido ignorado (\(text.count) caracteres)")
             return
         }
         guardarRespaldoTexto(text)
 
         // BLINDAJE CERO VOLTEO DE PANTALLA:
-        // Nunca forzamos target.activate() sobre otras apps para no voltear el Space si Sebas cambió de escritorio mientras hablaba.
+        // Nunca forzamos target.activate() sobre otras apps para no voltear el Space si el usuario cambió de escritorio mientras hablaba.
         // Solo devolvemos foco a lastExternalApp si la app frontal actual fuese Dictado Domotex por clic en Dock/Spotlight.
         let currentApp = NSWorkspace.shared.frontmostApplication
         if currentApp?.bundleIdentifier == Bundle.main.bundleIdentifier, let fallback = lastExternalApp {
@@ -1134,11 +1141,25 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     @objc func repaste() {
-        if let s = try? String(contentsOf: backupTextURL, encoding: .utf8), isValidText(s) {
-            log("Re-pegado manual (⌥⌘N): \"\(s.prefix(60))...\" (\(s.count) caracteres)")
+        let candidate: String? = {
+            if isValidText(lastTranscribedText) { return lastTranscribedText }
+            if saveLastDictationHistory,
+               let s = try? String(contentsOf: backupTextURL, encoding: .utf8),
+               isValidText(s) {
+                return s
+            }
+            return nil
+        }()
+
+        if let s = candidate {
+            if saveLastDictationHistory {
+                log("Re-pegado manual (⌥⌘N): \"\(s.prefix(60))...\" (\(s.count) caracteres)")
+            } else {
+                log("Re-pegado manual desde RAM (⌥⌘N): (\(s.count) caracteres)")
+            }
             paste(s)
         } else {
-            log("Re-pegado ignorado: no hay texto válido en \(backupTextURL.path)")
+            log("Re-pegado ignorado: no hay texto previo válido en RAM ni en respaldo")
             overlay.show(status: "⚪ No hay texto previo para pegar", targetApp: lastExternalApp)
             overlay.scheduleHide(after: 1.8)
         }
